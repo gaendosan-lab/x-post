@@ -1,51 +1,60 @@
 import os
 import random
 import requests
-from bs4 import BeautifulSoup
+import google.generativeai as genai
 import tweepy
 import urllib.parse
+import feedparser
 
-# --- FUNGSI BARU UNTUK SCRAPING YAHOO SPORTS ---
-def scrape_yahoo_sports():
-    """Mengambil judul dan gambar artikel secara acak dari Yahoo Sports."""
-    url = "https://sports.yahoo.com/"
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-    }
+# --- FUNGSI UNTUK SCRAPING (DIPERBARUI DENGAN RSS) ---
+def scrape_google_news_sports():
+    """Mengambil satu berita olahraga teratas dari Google News RSS Feed untuk Amerika Serikat."""
+    # URL RSS Feed untuk Google News seksi olahraga di Amerika Serikat
+    rss_url = "https://news.google.com/rss/topics/CAAqJggKIiBDQkFTRWdvSUwyMHZNRFp1ZEdvU0FtVnpHZ0pKVGlnQVAB?hl=en-US&gl=US&ceid=US:en"
     try:
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, 'html.parser')
+        # Parsing RSS feed
+        news_feed = feedparser.parse(rss_url)
 
-        # Cari semua artikel yang ada di halaman utama
-        articles = soup.find_all('li', {'class': 'js-stream-content'})
-        
-        if not articles:
-            print("Peringatan: Tidak ada artikel yang ditemukan. Mungkin struktur website berubah.")
-            return None, None
+        if not news_feed.entries:
+            print("Peringatan: Tidak ada berita yang ditemukan di RSS Feed.")
+            return None
 
-        # Pilih satu artikel secara acak
-        selected_article = random.choice(articles)
+        # Mengambil semua judul berita dari feed
+        news_titles = [entry.title for entry in news_feed.entries]
 
-        # Ambil judul dari tag 'h3' di dalam artikel
-        title_element = selected_article.find('h3')
-        title = title_element.get_text(strip=True) if title_element else "Judul Tidak Ditemukan"
-        
-        # Ambil gambar dari tag 'img' di dalam artikel
-        image_element = selected_article.find('img')
-        image_url = image_element['src'] if image_element and image_element.has_attr('src') else None
+        # Memilih satu berita secara acak dari daftar
+        selected_news = random.choice(news_titles)
+        # print(f"Ditemukan {len(news_titles)} berita dari RSS, memilih satu secara acak: {selected_news}")
+        return selected_news
 
-        print(f"Artikel yang dipilih: '{title}'")
-        print(f"URL Gambar: {image_url}")
-        
-        return title, image_url
-
-    except requests.exceptions.RequestException as e:
-        print(f"Error saat mengakses Yahoo Sports: {e}")
-        return None, None
     except Exception as e:
-        print(f"Terjadi error saat scraping: {e}")
-        return None, None
+        print(f"Error saat mengakses atau parsing RSS Feed: {e}")
+        return None
+
+# --- FUNGSI UNTUK GENERASI KONTEN ---
+def generate_post_with_gemini(trend):
+    """Membuat konten post dengan Gemini API berdasarkan satu tren."""
+    gemini_api_key = os.getenv('GEMINI_API_KEY')
+    if not gemini_api_key:
+        # Menggunakan raise ValueError agar program berhenti jika kunci API tidak ada
+        raise ValueError("GEMINI_API_KEY tidak ditemukan di environment variables!")
+
+    genai.configure(api_key=gemini_api_key)
+    model = genai.GenerativeModel('gemini-1.5-flash-latest')
+
+    prompt = (
+        f"You are a social media expert. Write a short, engaging post in English about this topic: '{trend}'. "
+        f"The post MUST have a strong Call to Action to encourage clicks. "
+        f"Do NOT add any links or hashtags in your response. Just provide the main text."
+    )
+
+    try:
+        response = model.generate_content(prompt)
+        # print("Konten berhasil dibuat oleh Gemini.")
+        return response.text.strip()
+    except Exception as e:
+        print(f"Error saat menghubungi Gemini API: {e}")
+        return None
 
 # --- FUNGSI UNTUK MENDAPATKAN LINK ---
 def get_random_link(filename="links.txt"):
@@ -63,30 +72,26 @@ def post_to_x(text_to_post, image_url=None):
     """Memposting teks dan gambar (opsional) ke X.com."""
     try:
         media_ids = []
-        # Inisialisasi API v1.1 untuk upload media
-        auth = tweepy.OAuth1UserHandler(
-            os.getenv('X_API_KEY'), os.getenv('X_API_SECRET'),
-            os.getenv('X_ACCESS_TOKEN'), os.getenv('X_ACCESS_TOKEN_SECRET')
-        )
-        api = tweepy.API(auth)
-        
         if image_url:
+            auth = tweepy.OAuth1UserHandler(
+                os.getenv('X_API_KEY'), os.getenv('X_API_SECRET'),
+                os.getenv('X_ACCESS_TOKEN'), os.getenv('X_ACCESS_TOKEN_SECRET')
+            )
+            api = tweepy.API(auth)
+
             filename = 'temp_image.jpg'
-            # Unduh gambar
             response = requests.get(image_url, stream=True)
             if response.status_code == 200:
                 with open(filename, 'wb') as image_file:
                     for chunk in response.iter_content(1024):
                         image_file.write(chunk)
-                
-                # Upload gambar ke X
+
                 media = api.media_upload(filename=filename)
                 media_ids.append(media.media_id_string)
-                print("Gambar berhasil di-upload.")
+                print("✅ Gambar berhasil di-upload.")
             else:
                 print(f"Gagal mengunduh gambar. Status code: {response.status_code}")
 
-        # Inisialisasi Client v2 untuk membuat tweet
         client = tweepy.Client(
             bearer_token=os.getenv('X_BEARER_TOKEN'),
             consumer_key=os.getenv('X_API_KEY'),
@@ -94,38 +99,58 @@ def post_to_x(text_to_post, image_url=None):
             access_token=os.getenv('X_ACCESS_TOKEN'),
             access_token_secret=os.getenv('X_ACCESS_TOKEN_SECRET')
         )
-        
-        # Buat tweet dengan atau tanpa media
+
         if media_ids:
             response = client.create_tweet(text=text_to_post, media_ids=media_ids)
         else:
             response = client.create_tweet(text=text_to_post)
-            
-        print(f"Berhasil memposting tweet ID: {response.data['id']}")
-        
-    except Exception as e:
-        print(f"Error saat memposting ke X.com: {e}")
 
-# --- FUNGSI UTAMA (DIPERBAIKI) ---
+        print(f"✅ Berhasil memposting tweet! ID: {response.data['id']}")
+
+    except Exception as e:
+        print(f"❌ GAGAL: Error saat memposting ke X.com: {e}")
+
+
+# --- FUNGSI UTAMA (DIPERBAIKI DENGAN DEBUGGING) ---
 if __name__ == "__main__":
     print("Memulai proses auto-posting...")
-    
-    # Panggil fungsi scrape Yahoo Sports
-    article_title, image_url = scrape_yahoo_sports()
-    
-    if article_title:
+
+    # Langkah 1: Mengambil berita olahraga
+    selected_news = scrape_google_news_sports()
+
+    if selected_news:
+        print(f"✅ Berita berhasil didapatkan: '{selected_news}'")
+
+        # Langkah 2: Mendapatkan link acak
         random_link = get_random_link()
-        
         if random_link:
-            # Gabungkan judul artikel dan link acak
-            final_post_text = f"{article_title} {random_link}"
-            
-            print("--- POSTINGAN FINAL ---")
-            print(f"Teks: {final_post_text}")
-            print(f"Gambar: {image_url}")
-            print("-----------------------")
-            
-            # Kirim teks gabungan dan URL gambar ke fungsi posting
-            post_to_x(final_post_text, image_url)
-    
-    print("Proses selesai.")
+            print(f"✅ Link berhasil didapatkan: '{random_link}'")
+
+            # Langkah 3: Membuat konten dengan Gemini
+            gemini_text = generate_post_with_gemini(selected_news)
+            if gemini_text:
+                print(f"✅ Teks dari Gemini berhasil dibuat.")
+                # print(f"Teks dari Gemini: {gemini_text}") # Uncomment jika ingin lihat teksnya
+
+                # Langkah 4: Membuat URL gambar
+                image_url = f"https://tse1.mm.bing.net/th?q={urllib.parse.quote(selected_news)}"
+                print(f"✅ URL Gambar dibuat: {image_url}")
+
+                # Gabungkan teks dan link
+                final_post_text = f"{gemini_text} {random_link}"
+
+                print("\n--- POSTINGAN FINAL SIAP ---")
+                print(f"Teks: {final_post_text}")
+                print("----------------------------\n")
+
+                # Langkah 5: Posting ke X.com
+                post_to_x(final_post_text, image_url)
+
+            else:
+                print("❌ GAGAL: Gemini tidak dapat membuat konten. Proses dihentikan.")
+        else:
+            print("❌ GAGAL: Tidak ada link yang ditemukan di links.txt. Proses dihentikan.")
+    else:
+        print("❌ GAGAL: Tidak ada berita yang bisa diambil dari RSS Feed. Proses dihentikan.")
+
+    print("\nProses selesai.")
